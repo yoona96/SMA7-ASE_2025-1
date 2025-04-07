@@ -1,0 +1,101 @@
+name: CI via Repository Dispatch (Static Analysis)
+
+on:
+  repository_dispatch:
+    types: [trigger-ci]
+
+jobs:
+  static-analysis:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone Repository
+        run: |
+          git clone https://github.com/${{ github.event.client_payload.repository }} source-code
+          cd source-code
+          git checkout ${{ github.event.client_payload.commit_sha }}
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake cppcheck clang-tidy gcovr libgtest-dev jq
+
+      - name: Install Google Test
+        run: |
+          cd /usr/src/gtest
+          sudo cmake .
+          sudo make
+          sudo cp lib/*.a /usr/lib
+
+      - name: Setup SonarCloud Scanner
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Download build-wrapper
+        run: |
+          curl -sSLo build-wrapper-linux-x86.zip https://sonarcloud.io/static/cpp/build-wrapper-linux-x86.zip
+          unzip build-wrapper-linux-x86.zip
+
+      - name: Build with Coverage (wrapped by SonarCloud build-wrapper)
+        run: |
+          mkdir build
+          cd build
+          cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CXX_FLAGS="--coverage -O0" ../source-code
+          ../build-wrapper-linux-x86/build-wrapper-linux-x86-64 --out-dir ../bw-output make
+          make
+          ctest --output-on-failure || true
+
+      - name: Run cppcheck
+        run: |
+          cppcheck --enable=all --inconclusive --std=c++17 --language=c++ \
+                   -I source-code/include source-code/src 2> cppcheck-report.txt
+
+      - name: Display cppcheck Report
+        run: cat cppcheck-report.txt
+
+      - name: Run clang-tidy
+        run: |
+          mkdir -p clang-tidy-report
+          find source-code -name '*.cpp' | xargs -I {} clang-tidy {} -p build > clang-tidy-report/report.txt 2>&1 || true
+
+      - name: Display clang-tidy Report
+        run: cat clang-tidy-report/report.txt
+
+      - name: Generate Coverage Report
+        run: |
+          gcovr -r source-code --exclude tests --sonarqube -o coverage.xml
+
+      - name: Run SonarCloud Analysis
+        run: |
+          sonar-scanner \
+            -Dsonar.projectKey=${{ github.event.client_payload.repository }} \
+            -Dsonar.organization=YOUR_SONAR_ORG \
+            -Dsonar.sources=source-code/src \
+            -Dsonar.cfamily.build-wrapper-output=bw-output \
+            -Dsonar.coverageReportPaths=coverage.xml \
+            -Dsonar.scm.provider=git
+
+      - name: Fetch SonarCloud issues
+        run: |
+          curl -s -u ${{ secrets.SONAR_TOKEN }}: \
+            "https://sonarcloud.io/api/issues/search?projectKeys=${{ github.event.client_payload.repository }}&resolved=false&pageSize=500" \
+            -o sonar-issues.json
+
+      - name: Create GitHub Issue with SonarCloud results
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "| Type | Severity | File | Line | Description |" > issue-body.md
+          echo "|------|----------|------|------|-------------|" >> issue-body.md
+
+          jq -r '.issues[] | "| \(.type) | \(.severity) | \(.component | sub(\".*src/\"; \"\")) | \(.line // \"N/A\") | \(.message | gsub(\"[\r\n]\"; \" \")) |"' sonar-issues.json >> issue-body.md
+
+          if [ $(wc -l < issue-body.md) -gt 2 ]; then
+            gh issue create --title "SonarCloud Static Analysis Results" --body-file issue-body.md
+          else
+            echo "No issues found."
+          fi
+
+      - name: Show Coverage Report
+        run: cat coverage.xml

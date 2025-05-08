@@ -70,7 +70,6 @@ jobs:
           if grep -qE "^[0-9]+:.*" report/flawfinder-report.txt; then
             awk '
               BEGIN { IGNORECASE=1 }
-      보
             -o sonar-issues.json
 
 

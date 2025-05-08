@@ -8,14 +8,9 @@ This environment ...
 2. Builds project with CMake.
 3. Performs unit testing.
 4. Checks coverage of unit test (GTest) with gcovr.
-5. Runs static analysis (cppCheck + Clang-tidy + Sonarqube)
+5. Runs static analysis (cppCheck + Clang-tidy + FlawFinder + Sonarqube)
 6. Makes a github issue.
 
 We need ...
 1. Development team's sonarqube token.
-2. Development team's repository dispatched.
-
-Development team needs ...
-1. Public development github repository.
-2. .yml file in .github/workflows folder to trigger dispatch.
-3. V&V team's PAT (personal access token) as secret key.
+2. Development team's public repository address.

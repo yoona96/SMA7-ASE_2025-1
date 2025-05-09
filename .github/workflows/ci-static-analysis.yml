@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
+  ##### Static Analysis #####
   static-analysis:
     runs-on: ubuntu-latest
 
@@ -18,6 +19,12 @@ jobs:
           mv source-code ../source-code  #개발팀의 source code가 source-code 폴더 아래에 있다는 전제 하에
           mv sonar-project.properties ../sonar-project.properties  #sonar-project.properties는 root에 있어야 함
 
+
+  ##### Install dependencies #####
+  install-dependencies:
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Install Dependencies
         run: |
           sudo apt-get update
@@ -38,6 +45,12 @@ jobs:
           curl -sSLo build-wrapper-linux-x86.zip https://sonarcloud.io/static/cpp/build-wrapper-linux-x86.zip
           unzip build-wrapper-linux-x86.zip
 
+
+  ##### Build with coverage #####
+  build-with-coverage:
+    runs-on: ubuntu-latest
+
+    steps:
       - name: ⚙️ Build with GCC and Coverage (Sonar Wrapped)
         run: |
           export CC=gcc
@@ -50,13 +63,21 @@ jobs:
           ctest --output-on-failure || true
 
 
-      ##### CPPCHECK #####
+  ##### CPPCHECK #####
+  cppcheck:
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Run cppcheck
         run: |
           cppcheck --enable=all --inconclusive --std=c++17 --language=c++ \
                    -I source-code/include source-code/src 2> report/cppcheck-report.txt
 
-      ##### FLAWFINDER #####
+  ##### FLAWFINDER #####
+  flawfinder:
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Run flawfinder and save txt
         run: |
           mkdir -p report
@@ -73,7 +94,141 @@ jobs:
             -o sonar-issues.json
 
 
-      ##### STATIC ANALYSIS REPORTS #####
+  ##### CLANG TIDY #####
+  clang-tidy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run clang-tidy
+        run: |
+          mkdir -p report
+          clang_tidy_report=report/clang-tidy-report.txt
+          echo "" > "$clang_tidy_report"
+      
+          find source-code -name '*.cpp' | while read file; do
+            echo "Checking $file" >> "$clang_tidy_report"
+            clang-tidy "$file" -p build -checks=* >> report/clang-tidy-report.txt 2>&1 || true
+          done
+      
+          # 확인용 디버깅
+          cat "$clang_tidy_report"
+
+
+  ##### Coverage Report #####
+  coverage-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ✅ Generate Coverage Report (Ignore CMake & errors)
+        run: |
+          gcovr --sonarqube \
+                -r source-code \
+                --object-directory build \
+                --exclude build/CMakeFiles \
+                --gcov-ignore-errors=all \
+                --fail-under-line 0 \
+                -o report/coverage.xml
+
+      - name: 📊 Generate Coverage Summary Table
+        run: |
+          total=0
+          covered=0
+      
+          while read -r line; do
+            # covered 속성값이 "true" 또는 "1"인지 확인
+            if echo "$line" | grep -q 'covered="\(true\|1\)"'; then
+              covered=$((covered + 1))
+            fi
+            total=$((total + 1))
+          done < <(grep "<lineToCover" report/coverage.xml)
+      
+          mkdir -p report
+          echo "| Metric | Value |" > report/coverage-summary.md
+          echo "|--------|-------|" >> report/coverage-summary.md
+      
+          if [ "$total" -gt 0 ]; then
+            percent=$(awk "BEGIN { printf \"%.2f\", ($covered/$total)*100 }")
+            echo "| Coverage | $percent% ($covered / $total lines) |" >> report/coverage-summary.md
+          else
+            echo "| Coverage | N/A (No lines to cover) |" >> report/coverage-summary.md
+          fi
+
+      - name: 🔍 List Uncovered Lines
+        run: |
+          echo "| File | Line |" > report/uncovered-lines.md
+          echo "|------|------|" >> report/uncovered-lines.md
+      
+          grep '<lineToCover' report/coverage.xml | grep 'covered="false"' | while read -r line; do
+            file=$(echo "$line" | sed -n 's/.*<file path="\([^"]*\)".*/\1/p')
+            lineno=$(echo "$line" | sed -n 's/.*lineNumber="\([0-9]*\)".*/\1/p')
+      
+            # 만약 file이 비어있으면 이전 file 경로 유지
+            if [ -n "$file" ]; then current_file="$file"; fi
+      
+            if [ -n "$lineno" ]; then
+              echo "| $current_file | $lineno |" >> report/uncovered-lines.md
+            fi
+          done
+      
+      - name: 📈 Verify Coverage Summary Output
+        run: |
+          if [ -s report/coverage-summary.md ]; then
+            echo "✅ Coverage summary is present."
+          else
+            echo "⚠️ coverage-summary.md is empty!"
+            cat report/coverage.xml
+          fi
+
+
+  ##### SONAR CLOUD #####
+  sonar-cloud:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🚀 Run SonarCloud Analysis
+        uses: SonarSource/sonarqube-scan-action@v5.0.0
+        if: success()
+        with:
+          args: >
+            -Dsonar.projectKey=yoona96_Dev-Sample-Repo
+            -Dsonar.organization=yoona96
+            -Dsonar.sources=source-code/src
+            -Dsonar.cfamily.build-wrapper-output=bw-output
+            -Dsonar.coverageReportPaths=report/coverage.xml
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Fetch SonarCloud issues
+        run: |
+          curl -s -u ${{ secrets.SONAR_TOKEN }}: \
+            "https://sonarcloud.io/api/issues/search?projectKeys=yoona96_Dev-Sample-Repo&resolved=false&pageSize=500" \
+            -o sonar-issues.json
+
+      - name: 🚀 Run SonarCloud Analysis
+        uses: SonarSource/sonarqube-scan-action@v5.0.0
+        if: success()
+        with:
+          args: >
+            -Dsonar.projectKey=yoona96_Dev-Sample-Repo
+            -Dsonar.organization=yoona96
+            -Dsonar.sources=source-code/src
+            -Dsonar.cfamily.build-wrapper-output=bw-output
+            -Dsonar.coverageReportPaths=report/coverage.xml
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Fetch SonarCloud issues
+        run: |
+          curl -s -u ${{ secrets.SONAR_TOKEN }}: \
+            "https://sonarcloud.io/api/issues/search?projectKeys=yoona96_Dev-Sample-Repo&resolved=false&pageSize=500" \
+            -o sonar-issues.json
+
+
+  ##### STATIC ANALYSIS REPORTS #####
+  static-analysis-reports:
+    runs-on: ubuntu-latest
+
+    steps:
       - name: 📤 Commit updated static-analysis artifacts
         run: |
           git config user.name  "github-actions"
@@ -149,7 +304,11 @@ jobs:
           jq -r '.issues[] | "| \(.type) | \(.severity) | \(.component | sub(".*src/"; "")) | \(.line // "N/A") | \(.message | gsub("[\r\n]"; " ")) |"' sonar-issues.json >> issue-body.md || echo "✅ No SonarCloud issues." >> issue-body.md
 
 
-      ##### ISSUE REPORT #####
+  ##### ISSUE REPORT #####
+  issue-report:
+    runs-on: ubuntu-latest
+    
+    steps:  
       - name: Create GitHub Issue with Full Static Analysis Results
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

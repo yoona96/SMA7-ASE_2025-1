@@ -72,6 +72,9 @@ jobs:
         with:
           name: source-code
 
+      - name: 🕵️ List current directory contents
+        run: ls -R
+
       - name: ⚙️ Build with GCC and Coverage (Sonar Wrapped)
         run: |
           export CC=gcc

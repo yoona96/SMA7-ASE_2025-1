@@ -1,4 +1,4 @@
-name: CI-CD
+name: CI-with-static-analysis
 
 on:
   workflow_dispatch:
@@ -11,12 +11,33 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
     
-      - name: Clone repository and check out target SHA
+      - name: Clone Dev repo
         run: |
-          git clone https://github.com/brian770/OOPT_development  #개발팀 github repo
-          cd repo-temp
-          mv source-code ../source-code  #개발팀의 source code가 source-code 폴더 아래에 있다는 전제 하에
-          mv sonar-project.properties ../sonar-project.properties  #sonar-project.properties는 root에 있어야 함
+          git clone https://github.com/brian770/OOPT_development repo-temp
+          mv repo-temp/source-code ./source-code
+
+      - name: Upload source-code artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-code
+          path: source-code
+
+      - name: 📁 Create and initialize report directory
+        run: |
+          mkdir -p report
+          echo "This is a placeholder file." > report/placeholder.txt
+
+      - name: 🔍 Check report directory
+        run: |
+          echo "현재 report 디렉토리 내용:"
+          find report
+
+      - name: Upload report (overwrite)
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: report
+          overwrite: true
 
 
   ##### INSTALL DEPENDENCIES #####
@@ -27,57 +48,117 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake cppcheck clang-tidy gcovr libgtest-dev jq flawfinder  #dependencies download
-
-      - name: 📁 Create report directory
-        run: mkdir -p report
-
+          sudo apt-get install -y build-essential cmake libgtest-dev  #dependencies download
+      
       - name: Install Google Test
         run: |
+          sudo apt-get install -y libgtest-dev
           cd /usr/src/gtest
           sudo cmake .
           sudo make
           sudo cp lib/*.a /usr/lib
-
-      - name: Download build-wrapper  #for sonarcloud
-        run: |
-          curl -sSLo build-wrapper-linux-x86.zip https://sonarcloud.io/static/cpp/build-wrapper-linux-x86.zip
-          unzip build-wrapper-linux-x86.zip
+          sudo cp -r /usr/src/gtest/include/gtest /usr/include/
 
 
   ##### BUILD WITH COVERAGE #####
   build-with-coverage:
     runs-on: ubuntu-latest
-    needs: install-dependencies
+    needs:
+      - checkout-and-clone
+      - install-dependencies
     steps:
+      - name: Download source-code artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: source-code
+
       - name: ⚙️ Build with GCC and Coverage (Sonar Wrapped)
         run: |
           export CC=gcc
           export CXX=g++
-          mkdir build
-          cd build
-          cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CXX_FLAGS="--coverage -O0" ../source-code
-          ../build-wrapper-linux-x86/build-wrapper-linux-x86-64 --out-dir ../bw-output make
-          make
-          ctest --output-on-failure || true
+          cmake -S source-code -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CXX_FLAGS="--coverage -O0"
+          cmake --build build --clean-first --verbose
+          ctest --test-dir build --output-on-failure || true
+
+      - name: Upload build directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: build
 
 
   ##### CPPCHECK #####
   cppcheck:
     runs-on: ubuntu-latest
-    steps:
+    needs: 
+      - checkout-and-clone
+      - install-dependencies
+    steps:          
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+          
+      - name: Download source-code artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: source-code
+
+      - name: Download reports directory
+        uses: actions/download-artifact@v4
+        with:
+          name: report
+          path: report
+
+      - name: 🔍 Check report directory
+        run: |
+          echo "현재 report 디렉토리 내용:"
+            find report
+      
       - name: Run cppcheck
         run: |
           cppcheck --enable=all --inconclusive --std=c++17 --language=c++ \
                    -I source-code/include source-code/src 2> report/cppcheck-report.txt
 
+      - name: Upload report (overwrite)
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: report
+          overwrite: true
+          
+
   ##### FLAWFINDER #####
   flawfinder:
     runs-on: ubuntu-latest
+    needs: 
+      - checkout-and-clone
+      - install-dependencies
+      - cppcheck
     steps:
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flawfinder
+          
+      - name: Download source-code artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: source-code
+
+      - name: Download reports directory
+        uses: actions/download-artifact@v4
+        with:
+          name: report
+          path: report
+
+      - name: 🔍 Check report directory
+        run: |
+          echo "현재 report 디렉토리 내용:"
+            find report
+    
       - name: Run flawfinder and save txt
         run: |
-          mkdir -p report
           flawfinder --columns source-code/src > report/flawfinder-report.txt
       
       - name: Generate flawfinder markdown table
@@ -85,19 +166,60 @@ jobs:
           echo "| File | Line | Risk | Description |" > report/flawfinder-issues.md
           echo "|------|------|------|-------------|" >> report/flawfinder-issues.md
       
-          if grep -qE "^[0-9]+:.*" report/flawfinder-report.txt; then
-            awk '
-              BEGIN { IGNORECASE=1 }
-            -o sonar-issues.json
+            if grep -qE "^[0-9]+:.*" report/flawfinder-report.txt; then
+              awk '
+                /^[0-9]+:/ {
+                  split($0, arr, ":")
+                  file = arr[1]
+                  line = arr[2]
+                  risk = arr[3]
+                  desc = substr($0, index($0, arr[4]))
+                  gsub(/\|/, "\\|", desc)
+                  printf("| %s | %s | %s | %s |\n", file, line, risk, desc)
+                }
+              ' report/flawfinder-report.txt >> report/flawfinder-issues.md
+            fi
 
+      - name: Upload report (overwrite)
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: report
+          overwrite: true
+          
 
   ##### CLANG TIDY #####
   clang-tidy:
     runs-on: ubuntu-latest
+    needs: 
+      - checkout-and-clone
+      - install-dependencies
+      - cppcheck
+      - flawfinder
     steps:
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy  #dependencies download
+          
+      - name: Download source-code artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: source-code
+
+      - name: Download reports directory
+        uses: actions/download-artifact@v4
+        with:
+          name: report
+          path: report
+          
+      - name: 🔍 Check report directory
+        run: |
+          echo "현재 report 디렉토리 내용:"
+            find report
+          
       - name: Run clang-tidy
         run: |
-          mkdir -p report
           clang_tidy_report=report/clang-tidy-report.txt
           echo "" > "$clang_tidy_report"
       
@@ -109,16 +231,55 @@ jobs:
           # 확인용 디버깅
           cat "$clang_tidy_report"
 
+      - name: Upload report (overwrite)
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: report
+          overwrite: true
+
 
   ##### Coverage Report #####
   coverage-report:
     runs-on: ubuntu-latest
-    needs: build-with-coverage
+    needs:
+      - checkout-and-clone
+      - build-with-coverage
+      - cppcheck
+      - flawfinder
+      - clang-tidy
     steps:
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcovr  #dependencies download
+    
+      - name: Download source-code artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: source-code
+
+      - name: Download reports directory
+        uses: actions/download-artifact@v4
+        with:
+          name: report
+          path: report
+          
+      - name: 🔍 Check report directory
+        run: |
+          echo "현재 report 디렉토리 내용:"
+            find report
+
+      - name: Download build directory
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: build
+          
       - name: ✅ Generate Coverage Report (Ignore CMake & errors)
         run: |
           gcovr --sonarqube \
-                -r source-code \
+                -r . \
                 --object-directory build \
                 --exclude build/CMakeFiles \
                 --gcov-ignore-errors=all \
@@ -175,20 +336,54 @@ jobs:
             cat report/coverage.xml
           fi
 
+      - name: Upload report (overwrite)
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: report
+          overwrite: true
+
 
   ##### SONAR CLOUD #####
   sonar-cloud:
     runs-on: ubuntu-latest
+    needs:
+      - checkout-and-clone
+      - install-dependencies
+      - build-with-coverage
+      - coverage-report
     steps:
+      - name: Download source-code artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: source-code
+
+      - name: Download reports directory
+        uses: actions/download-artifact@v4
+        with:
+          name: report
+          path: report
+          
+      - name: 🔍 Check report directory
+        run: |
+          echo "현재 report 디렉토리 내용:"
+            find report
+
+      - name: Download build directory
+        uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: build
+
       - name: 🚀 Run SonarCloud Analysis
         uses: SonarSource/sonarqube-scan-action@v5.0.0
         if: success()
         with:
           args: >
-            -Dsonar.projectKey=yoona96_Dev-Sample-Repo
-            -Dsonar.organization=yoona96
+            -Dsonar.projectKey=brian770_OOPT_development
+            -Dsonar.organization=brain770
             -Dsonar.sources=source-code/src
-            -Dsonar.cfamily.build-wrapper-output=bw-output
+            -Dsonar.cfamily.compile-commands=build/compile_commands.json
             -Dsonar.coverageReportPaths=report/coverage.xml
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -196,19 +391,52 @@ jobs:
       - name: Fetch SonarCloud issues
         run: |
           curl -s -u ${{ secrets.SONAR_TOKEN }}: \
-            "https://sonarcloud.io/api/issues/search?projectKeys=yoona96_Dev-Sample-Repo&resolved=false&pageSize=500" \
-            -o sonar-issues.json
+            "https://sonarcloud.io/api/issues/search?projectKeys=brian770_OOPT_development&resolved=false&pageSize=500" \
+            -o report/sonar-issues.json
+
+      - name: 📈 Verify Sonar Issue Output
+        run: |
+          if [ -s report/sonar-issues.json ]; then
+            echo "✅ Sonar issue is present."
+          else
+            echo "⚠️ sonar-issues.json is empty!"
+            cat report/sonar-issues.json
+          fi
+
+      - name: Upload report (overwrite)
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: report
+          overwrite: true
 
 
   ##### STATIC ANALYSIS REPORTS #####
   static-analysis-reports:
     runs-on: ubuntu-latest
     needs:
+      - checkout-and-clone
+      - install-dependencies
+      - build-with-coverage
       - cppcheck
       - flawfinder
       - clang-tidy
       - sonar-cloud 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3   # ✅ Git 저장소 초기화됨
+      
+      - name: Download reports directory
+        uses: actions/download-artifact@v4
+        with:
+          name: report
+          path: report
+          
+      - name: 🔍 Check report directory
+        run: |
+          echo "현재 report 디렉토리 내용:"
+            find report
+          
       - name: 📤 Commit updated static-analysis artifacts
         run: |
           git config user.name  "github-actions"
@@ -219,7 +447,8 @@ jobs:
                   report/flawfinder-issues.md \
                   report/flawfinder-report.txt \
                   report/coverage.xml \
-                  report/coverage-summary.md
+                  report/coverage-summary.md \
+                  report/sonar-issues.json
       
           if ! git diff --cached --quiet; then
             git commit -m "Update static analysis artifacts"
@@ -231,12 +460,12 @@ jobs:
 
       - name: 📝 Merge all static analysis results into issue-body.md
         run: |
-          echo "# 📊 Static Analysis Summary Report" > issue-body.md
+          echo "# 📊 Static Analysis Summary Report" > report/issue-body.md
 
           ## cppcheck 테이블
-          echo -e "\n## 🚨 cppcheck Results\n" >> issue-body.md
-          echo "| File | Line | Severity | Message |" >> issue-body.md
-          echo "|------|------|----------|---------|" >> issue-body.md
+          echo -e "\n## 🚨 cppcheck Results\n" >> report/issue-body.md
+          echo "| File | Line | Severity | Message |" >> report/issue-body.md
+          echo "|------|------|----------|---------|" >> report/issue-body.md
       
           awk '
             match($0, /^([^:]+):([0-9]+):[0-9]*:\s+([a-zA-Z]+):\s+(.*)/, arr) {
@@ -247,54 +476,77 @@ jobs:
               gsub(/\|/, "\\|", message)
               printf("| %s | %s | %s | %s |\n", file, line, severity, message)
             }
-          ' report/cppcheck-report.txt >> issue-body.md || echo "✅ No cppcheck issues found." >> issue-body.md
+          ' report/cppcheck-report.txt >> report/issue-body.md || echo "✅ No cppcheck issues found." >> report/issue-body.md
 
           ## clang-tidy 테이블
-          echo -e "\n## 🧹 clang-tidy Results\n" >> issue-body.md
-          echo "| File | Description |" >> issue-body.md
-          echo "|------|-------------|" >> issue-body.md
+          echo -e "\n## 🧹 clang-tidy Results\n" >> report/issue-body.md
+          echo "| File | Description |" >> report/issue-body.md
+          echo "|------|-------------|" >> report/issue-body.md
           grep -E "warning:|error:" report/clang-tidy-report.txt | while read line; do
             file=$(echo "$line" | cut -d':' -f1)
             desc=$(echo "$line" | cut -d':' -f4-)
-            echo "| $file | $desc |" >> issue-body.md
-          done || echo "✅ No clang-tidy issues found." >> issue-body.md
+            echo "| $file | $desc |" >> report/issue-body.md
+          done || echo "✅ No clang-tidy issues found." >> report/issue-body.md
 
           ## flawfinder 테이블
-          echo -e "\n## 🔐 flawfinder Results\n" >> issue-body.md
-          cat report/flawfinder-issues.md >> issue-body.md || echo "✅ No flawfinder issues." >> issue-body.md
+          echo -e "\n## 🔐 flawfinder Results\n" >> report/issue-body.md
+          cat report/flawfinder-issues.md >> report/issue-body.md || echo "✅ No flawfinder issues." >> report/issue-body.md
 
           ## coverage 테이블
-          echo -e "\n## 📈 Coverage Summary (gcov)\n" >> issue-body.md
-          cat report/coverage-summary.md >> issue-body.md
+          echo -e "\n## 📈 Coverage Summary (gcov)\n" >> report/issue-body.md
+          cat report/coverage-summary.md >> report/issue-body.md
 
           ## uncovered coverage 테이블
-          echo -e "\n## ❌ Uncovered Lines\n" >> issue-body.md
+          echo -e "\n## ❌ Uncovered Lines\n" >> report/issue-body.md
           if [ -s report/uncovered-lines.md ]; then
-            cat report/uncovered-lines.md >> issue-body.md
+            cat report/uncovered-lines.md >> report/issue-body.md
           else
-            echo "✅ All lines are covered by tests." >> issue-body.md
+            echo "✅ All lines are covered by tests." >> report/issue-body.md
           fi
 
           ## SonarCloud 이슈 테이블
-          echo -e "\n## ☁️ SonarCloud Issues\n" >> issue-body.md
-          echo "| Type | Severity | File | Line | Description |" >> issue-body.md
-          echo "|------|----------|------|------|-------------|" >> issue-body.md
-          jq -r '.issues[] | "| \(.type) | \(.severity) | \(.component | sub(".*src/"; "")) | \(.line // "N/A") | \(.message | gsub("[\r\n]"; " ")) |"' sonar-issues.json >> issue-body.md || echo "✅ No SonarCloud issues." >> issue-body.md
+          echo -e "\n## ☁️ SonarCloud Issues\n" >> report/issue-body.md
+          echo "| Type | Severity | File | Line | Description |" >> report/issue-body.md
+          echo "|------|----------|------|------|-------------|" >> report/issue-body.md
+          jq -r '.issues[] | "| \(.type) | \(.severity) | \(.component | sub(".*src/"; "")) | \(.line // "N/A") | \(.message | gsub("[\r\n]"; " ")) |"' report/sonar-issues.json >> report/issue-body.md || echo "✅ No SonarCloud issues." >> report/issue-body.md
 
+      - name: Upload report (overwrite)
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: report
+          overwrite: true
+          
 
   ##### ISSUE REPORT #####
   issue-report:
     runs-on: ubuntu-latest
-    needs: static-analysis-reports
-    steps:  
+    needs: 
+      - static-analysis-reports
+      - build-with-coverage
+    steps:
+      - name: Checkout repository  # ✅ 반드시 추가
+        uses: actions/checkout@v3
+
+      - name: Download reports directory
+        uses: actions/download-artifact@v4
+        with:
+          name: report
+          path: report
+          
+      - name: 🔍 Check report directory
+        run: |
+          echo "현재 report 디렉토리 내용:"
+            find report
+            
       - name: Create GitHub Issue with Full Static Analysis Results
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ $(wc -l < issue-body.md) -gt 10 ]; then
+          if [ $(wc -l < report/issue-body.md) -gt 10 ]; then
             gh issue create \
               --title "🔍 정적 분석 통합 리포트" \
-              --body-file issue-body.md
+              --body-file report/issue-body.md
           else
             echo "✅ 분석 결과에 등록할 이슈가 없습니다."
           fi

@@ -71,6 +71,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: source-code
+          path: source-code
 
       - name: 🕵️ List current directory contents
         run: ls -R

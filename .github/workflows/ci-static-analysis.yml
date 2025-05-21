@@ -166,6 +166,7 @@ jobs:
       - name: Run flawfinder and save txt
         run: |
           flawfinder --columns source-code/src > report/flawfinder-report.txt
+          cat flawfinder-report.txt
       
       - name: Generate flawfinder markdown table
         run: |

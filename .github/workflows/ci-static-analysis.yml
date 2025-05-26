@@ -391,7 +391,7 @@ jobs:
         with:
           args: >
             -Dsonar.projectKey=brian770_OOPT_development
-            -Dsonar.organization=brain770
+            -Dsonar.organization=brian770
             -Dsonar.sources=source-code/src
             -Dsonar.cfamily.compile-commands=build/compile_commands.json
             -Dsonar.coverageReportPaths=report/coverage.xml
